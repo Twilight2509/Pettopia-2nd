@@ -52,7 +52,6 @@ let SanitizationPipe = class SanitizationPipe {
             const sanitized = Array.isArray(value) ? [] : {};
             for (const key in value) {
                 if (dangerousKeys.includes(key)) {
-                    console.warn(`⚠️  [Security] Blocked dangerous MongoDB operator: ${key}`);
                     continue;
                 }
                 sanitized[key] = this.sanitizeValue(value[key]);
