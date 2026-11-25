@@ -27,6 +27,12 @@ import { Medication, MedicationDocument } from 'src/schemas/preciption.schema';
 import { ClinicRating } from 'src/schemas/rating.schema';
 import { RatingRepository } from '../repositories/rating.repositories';
 import { CreateClinicRatingDto } from 'src/dto/rating.dto';
+import {
+  APPOINTMENT_SLOT_OCCUPYING_STATUSES,
+  APPOINTMENT_STATUS_TRANSITIONS,
+  APPOINTMENT_USER_CANCELLABLE_STATUSES,
+  APPOINTMENT_VET_BUSY_STATUSES,
+} from 'src/common/appointment.constants';
 
 @Injectable()
 export class AppointmentService {
@@ -56,6 +62,70 @@ export class AppointmentService {
   }
 
   // Helper function để kiểm tra có phải Admin hoặc Staff không
+  /** Chặn đặt lịch khi ca đã ngừng hoạt động hoặc đã hết slot trong ngày */
+  private async ensureShiftCapacity(
+    clinicId: string,
+    shiftData: { shift?: string; max_slot?: number; is_active?: boolean },
+    date: Date,
+    requestedSlots: number,
+  ): Promise<void> {
+    if (shiftData.is_active === false) {
+      throw createRpcError(HttpStatus.BAD_REQUEST, 'Ca khám này hiện đã ngừng hoạt động', 'SHIFT_INACTIVE');
+    }
+
+    const maxSlot = Number(shiftData.max_slot);
+    if (!shiftData.shift || !Number.isFinite(maxSlot) || maxSlot <= 0) {
+      return;
+    }
+
+    const booked = await this.appointmentRepositories.countByClinicShiftAndDate(
+      clinicId,
+      shiftData.shift,
+      date,
+      APPOINTMENT_SLOT_OCCUPYING_STATUSES,
+    );
+
+    if (booked + requestedSlots > maxSlot) {
+      const remaining = Math.max(maxSlot - booked, 0);
+      throw createRpcError(
+        HttpStatus.CONFLICT,
+        remaining === 0
+          ? 'Ca khám này đã kín lịch, vui lòng chọn ca hoặc ngày khác'
+          : `Ca khám này chỉ còn ${remaining} chỗ trống`,
+        'SHIFT_FULL',
+      );
+    }
+  }
+
+  /** Bác sĩ phải thuộc phòng khám của lịch hẹn và không đang khám ca khác trong ngày */
+  private async ensureVetCanTakeAppointment(
+    vetId: string,
+    appointment: Appointment,
+  ): Promise<void> {
+    const clinic = await lastValueFrom(
+      this.partnerService
+        .send({ cmd: 'getClinicById' }, { id: appointment.clinic_id })
+        .pipe(timeout(5000)),
+    ).catch(() => {
+      throw createRpcError(HttpStatus.BAD_REQUEST, 'Lỗi khi lấy thông tin phòng khám (Timeout/Error)', 'Bad Request');
+    });
+
+    const memberIds: string[] = (clinic?.data ?? clinic)?.member_ids ?? [];
+    if (!memberIds.includes(vetId)) {
+      throw createRpcError(HttpStatus.BAD_REQUEST, 'Bác sĩ không thuộc phòng khám của lịch hẹn này', 'VET_NOT_IN_CLINIC');
+    }
+
+    const isBusy = await this.appointmentRepositories.existsByVetOnDateAndStatuses(
+      vetId,
+      appointment.date,
+      APPOINTMENT_VET_BUSY_STATUSES,
+      appointment.id,
+    );
+    if (isBusy) {
+      throw createRpcError(HttpStatus.CONFLICT, 'Bác sĩ đang khám một lịch hẹn khác, vui lòng chọn bác sĩ khác hoặc chờ hoàn thành', 'VET_BUSY');
+    }
+  }
+
   private isAdminOrStaff(userRole: string | string[]): boolean {
     return this.hasRole(userRole, 'Admin') || this.hasRole(userRole, 'Staff');
   }
@@ -125,6 +195,8 @@ export class AppointmentService {
           'INVALID_APPOINTMENT_STATUS'
         );
       }
+
+      await this.ensureVetCanTakeAppointment(vetId, appointment);
 
       const updated = await this.appointmentRepositories.update(appointmentId, {
         vet_id: vetId,
@@ -752,8 +824,9 @@ export class AppointmentService {
       });
       console.log('>>> [createAppointment] shift:', JSON.stringify(shift));
 
-      // Validate Clinic
-      if (!clinic || clinic.is_active === false) {
+      // Validate Clinic (partner-service trả về { status, message, data })
+      const clinicData = clinic?.data ?? clinic;
+      if (!clinicData || clinicData.is_active === false) {
         throw new RpcException({
           status: HttpStatus.NOT_FOUND,
           message: 'Phòng khám không tồn tại hoặc đã ngừng hoạt động',
@@ -868,6 +941,13 @@ export class AppointmentService {
       console.log(
         'appointmentsToCreate:',
         JSON.stringify(appointmentsToCreate),
+      );
+
+      await this.ensureShiftCapacity(
+        clinic_id,
+        shift.data ?? shift,
+        appointmentDate,
+        appointmentsToCreate.length,
       );
 
       const result =
@@ -1039,6 +1119,26 @@ export class AppointmentService {
         // Admin/Staff có thể cập nhật tất cả
       }
 
+      const nextStatus = updateData.status as AppointmentStatus;
+      if (
+        nextStatus !== appointment.status &&
+        !APPOINTMENT_STATUS_TRANSITIONS[appointment.status]?.includes(nextStatus)
+      ) {
+        throw createRpcError(HttpStatus.BAD_REQUEST, `Không thể chuyển lịch hẹn từ ${appointment.status} sang ${nextStatus}`, 'INVALID_STATUS_TRANSITION');
+      }
+
+      // Khách hàng chỉ được tự hủy lịch chưa check-in
+      if (
+        role &&
+        this.hasRole(role, 'User') &&
+        !this.hasRole(role, 'Clinic') &&
+        !this.isAdminOrStaff(role) &&
+        (nextStatus !== AppointmentStatus.Cancelled ||
+          !APPOINTMENT_USER_CANCELLABLE_STATUSES.includes(appointment.status))
+      ) {
+        throw createRpcError(HttpStatus.FORBIDDEN, 'Bạn chỉ có thể hủy lịch hẹn chưa check-in', 'Forbidden');
+      }
+
       // Nếu cập nhật thành Cancelled và có userId, lưu cancelled_by
       const cancelledBy =
         updateData.status === AppointmentStatus.Cancelled && updatedByUserId
@@ -1113,6 +1213,23 @@ export class AppointmentService {
 
       if (appointment.status === AppointmentStatus.Completed) {
         throw createRpcError(HttpStatus.BAD_REQUEST, 'Không thể hủy lịch hẹn đã hoàn thành', 'Bad Request');
+      }
+
+      if (
+        !APPOINTMENT_STATUS_TRANSITIONS[appointment.status]?.includes(
+          AppointmentStatus.Cancelled,
+        )
+      ) {
+        throw createRpcError(HttpStatus.BAD_REQUEST, `Không thể hủy lịch hẹn ở trạng thái ${appointment.status}`, 'INVALID_APPOINTMENT_STATUS');
+      }
+
+      if (
+        this.hasRole(role, 'User') &&
+        !this.hasRole(role, 'Clinic') &&
+        !this.isAdminOrStaff(role) &&
+        !APPOINTMENT_USER_CANCELLABLE_STATUSES.includes(appointment.status)
+      ) {
+        throw createRpcError(HttpStatus.BAD_REQUEST, 'Lịch hẹn đã check-in, vui lòng liên hệ phòng khám để hủy', 'INVALID_APPOINTMENT_STATUS');
       }
 
       const cancelReason = cancelData?.cancel_reason;
@@ -1629,6 +1746,16 @@ export class AppointmentService {
       }
 
       const appointmentDate = new Date(date);
+
+      await this.ensureShiftCapacity(
+        clinic_id,
+        {
+          ...shiftData,
+          shift: shiftData.shift || shiftData.shift_name,
+        },
+        appointmentDate,
+        1,
+      );
 
       const newAppointmentData: any = {
         clinic_id,

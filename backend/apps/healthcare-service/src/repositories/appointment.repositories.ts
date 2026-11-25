@@ -223,6 +223,61 @@ export class AppointmentRepository {
     }
   }
 
+  async countByClinicShiftAndDate(
+    clinicId: string,
+    shift: string,
+    date: Date,
+    statuses: string[],
+  ): Promise<number> {
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+
+    return this.appointmentModel.countDocuments({
+      clinic_id: clinicId,
+      shift,
+      date: { $gte: start, $lt: end },
+      status: { $in: statuses },
+    });
+  }
+
+  async existsByVetOnDateAndStatuses(
+    vetId: string,
+    date: Date,
+    statuses: string[],
+    excludeId?: string,
+  ): Promise<boolean> {
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+
+    const query: any = {
+      vet_id: vetId,
+      date: { $gte: start, $lt: end },
+      status: { $in: statuses },
+    };
+    if (excludeId) query.id = { $ne: excludeId };
+    return !!(await this.appointmentModel.exists(query));
+  }
+
+  async updateStatusForDateBefore(
+    before: Date,
+    fromStatuses: string[],
+    toStatus: string,
+    cancelReason?: string,
+  ): Promise<number> {
+    const set: Record<string, string> = { status: toStatus };
+    if (cancelReason) set.cancel_reason = cancelReason;
+
+    const result = await this.appointmentModel.updateMany(
+      { date: { $lt: before }, status: { $in: fromStatuses } },
+      { $set: set },
+    );
+    return result.modifiedCount;
+  }
+
   async findById(id: string): Promise<Appointment | null> {
     try {
       return this.appointmentModel.findOne({ id }).lean();

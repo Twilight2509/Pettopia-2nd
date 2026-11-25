@@ -1,6 +1,7 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { AppController } from './controllers/app.controller';
 import { AppService } from './services/app.service';
+import { VipExpirationSchedulerService } from './services/vip-expiration-scheduler.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { User, UserSchema } from './schemas/user.schema';
@@ -25,7 +26,12 @@ import { PrometheusController } from './controllers/prometheus.controller';
   ],
 
   controllers: [AppController, PrometheusController],
-  providers: [AppService, UsersRepository, PrometheusService],
+  providers: [
+    AppService,
+    UsersRepository,
+    PrometheusService,
+    VipExpirationSchedulerService,
+  ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

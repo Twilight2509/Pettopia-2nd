@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { AppointmentController } from './controllers/appointment.controller';
 import { AppointmentService } from './services/appointment.service';
+import { AppointmentSchedulerService } from './services/appointment-scheduler.service';
 import { AppointmentRepository } from './repositories/appointment.repositories';
 import { RatingRepository } from './repositories/rating.repositories';
 import { Appointment, AppointmentSchema } from './schemas/appoinment.schema';
@@ -107,6 +108,7 @@ import { PrometheusService } from './services/prometheus.service';
   controllers: [AppointmentController, PrometheusController],
   providers: [
     AppointmentService,
+    AppointmentSchedulerService,
     AppointmentRepository,
     RatingRepository,
     PrometheusService,
